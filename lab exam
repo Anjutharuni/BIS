@@ -1,0 +1,120 @@
+import cv2
+import numpy as np
+from tkinter import Tk
+from tkinter.filedialog import askopenfilename
+from multiprocessing import Pool, cpu_count
+
+# ------------------------
+# Similarity functions
+# ------------------------
+def intensity_similarity(p1, p2, threshold=20):
+    return abs(int(p1) - int(p2)) < threshold
+
+def color_similarity(p1, p2, threshold=30):
+    return np.linalg.norm(np.array(p1) - np.array(p2)) < threshold
+
+def texture_similarity(val1, val2, threshold=10):
+    return abs(val1 - val2) < threshold
+
+def local_texture(gray, x, y, win=3):
+    patch = gray[max(0,x-win):x+win+1, max(0,y-win):y+win+1]
+    return patch.std()
+
+# ------------------------
+# Cellular automata update
+# ------------------------
+def update_pixel(args):
+    x, y, img, mode, feature_map = args
+    h, w = img.shape[:2]
+    current = img[x, y]
+    neighbors = []
+
+    for dx in [-1,0,1]:
+        for dy in [-1,0,1]:
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < h and 0 <= ny < w and (dx !=0 or dy !=0):
+                neighbors.append((nx, ny))
+
+    for nx, ny in neighbors:
+        neighbor = img[nx, ny]
+        similar = False
+
+        if mode == 'intensity':
+            similar = intensity_similarity(current, neighbor)
+        elif mode == 'color':
+            similar = color_similarity(current, neighbor)
+        elif mode == 'texture':
+            similar = texture_similarity(feature_map[x, y], feature_map[nx, ny])
+
+        if similar:
+            img[x, y] = neighbor
+            if mode == 'texture':
+                feature_map[x, y] = feature_map[nx, ny]
+            break
+
+    return (x, y, img[x, y])
+
+# ------------------------
+# PCA segmentation function
+# ------------------------
+def parallel_cellular_segmentation(input_img, mode='color', iterations=5):
+    if mode == 'intensity' or mode == 'texture':
+        gray = cv2.cvtColor(input_img, cv2.COLOR_BGR2GRAY)
+        img = gray.copy()  # Use single-channel for intensity and texture
+        img = np.expand_dims(img, axis=2)  # Keep shape (h,w,1) for consistency
+    else:
+        img = input_img.copy()
+
+    h, w = img.shape[:2]
+
+    feature_map = None
+    if mode == 'texture':
+        feature_map = np.zeros((h, w))
+        for i in range(h):
+            for j in range(w):
+                feature_map[i, j] = local_texture(gray, i, j)
+
+    for it in range(iterations):
+        args_list = [(x, y, img, mode, feature_map) for x in range(h) for y in range(w)]
+        with Pool(cpu_count()) as pool:
+            results = pool.map(update_pixel, args_list)
+        for x, y, val in results:
+            img[x, y] = val
+
+        if mode == 'texture':
+            gray = img[:,:,0]  # Update grayscale
+            for i in range(h):
+                for j in range(w):
+                    feature_map[i, j] = local_texture(gray, i, j)
+
+    # Convert back to 3 channels for saving if needed
+    if mode in ['intensity', 'texture']:
+        img = cv2.cvtColor(img[:,:,0], cv2.COLOR_GRAY2BGR)
+
+    return img
+
+# ------------------------
+# Main entry point
+# ------------------------
+if __name__ == "__main__":
+    Tk().withdraw()
+    file_path = askopenfilename(title="Select an image file")
+    if not file_path:
+        print("No file selected.")
+        exit()
+
+    input_img = cv2.imread(file_path)
+
+    print("Running color segmentation...")
+    seg_color = parallel_cellular_segmentation(input_img, mode='color')
+    cv2.imwrite("pca_color.jpg", seg_color)
+
+    print("Running intensity segmentation...")
+    seg_intensity = parallel_cellular_segmentation(input_img, mode='intensity')
+    cv2.imwrite("pca_intensity.jpg", seg_intensity)
+
+    print("Running texture segmentation...")
+    seg_texture = parallel_cellular_segmentation(input_img, mode='texture')
+    cv2.imwrite("pca_texture.jpg", seg_texture)
+
+    print("Segmentation completed: pca_color.jpg, pca_intensity.jpg, pca_texture.jpg")
